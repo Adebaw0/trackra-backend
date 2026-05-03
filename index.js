@@ -7,20 +7,22 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔌 NEON DATABASE CONNECTION
+// 🔌 DATABASE
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// 🟢 HOME
+// =========================
+// HOME
+// =========================
 app.get("/", (req, res) => {
   res.json({ message: "Trackra API Running 🚀" });
 });
 
 
 // =========================
-// 🔐 LOGIN
+// LOGIN
 // =========================
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
@@ -35,7 +37,10 @@ app.post("/login", async (req, res) => {
       return res.status(400).json({ error: "Invalid login" });
     }
 
-    res.json({ user: user.rows[0] });
+    const safeUser = user.rows[0];
+    delete safeUser.password;
+
+    res.json({ user: safeUser });
 
   } catch (err) {
     console.error(err);
@@ -45,7 +50,7 @@ app.post("/login", async (req, res) => {
 
 
 // =========================
-// 💳 GET WALLET
+// GET WALLET
 // =========================
 app.get("/wallets/:user_id", async (req, res) => {
   const { user_id } = req.params;
@@ -72,7 +77,7 @@ app.get("/wallets/:user_id", async (req, res) => {
 
 
 // =========================
-// 📜 TRANSACTIONS
+// TRANSACTIONS LIST
 // =========================
 app.get("/transactions/:user_id", async (req, res) => {
   const { user_id } = req.params;
@@ -93,39 +98,42 @@ app.get("/transactions/:user_id", async (req, res) => {
 
 
 // =========================
-// ➕ INCOME / EXPENSE
+// ADD TRANSACTION + FUND WALLET
 // =========================
 app.post("/transaction", async (req, res) => {
   const { user_id, type, wallet, amount, category, note } = req.body;
 
   try {
+    // insert transaction
     await pool.query(
       `INSERT INTO transactions (user_id, type, amount, category, note)
        VALUES ($1, $2, $3, $4, $5)`,
       [user_id, type, amount, category, note]
     );
 
-    // update wallet balance
+    // update wallet safely
     if (wallet) {
+      const value = type === "income" ? amount : -amount;
+
       await pool.query(
         `UPDATE wallets
-         SET ${wallet} = ${wallet} + $1
+         SET ${wallet} = COALESCE(${wallet}, 0) + $1
          WHERE user_id = $2`,
-        [type === "income" ? amount : -amount, user_id]
+        [value, user_id]
       );
     }
 
     res.json({ message: "Transaction added" });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Transaction failed" });
+    console.error("TX ERROR:", err.message);
+    res.status(500).json({ error: "Transaction failed", details: err.message });
   }
 });
 
 
 // =========================
-// 🔁 INTERNAL WALLET TRANSFER
+// INTERNAL TRANSFER (FIXED)
 // =========================
 app.post("/transfer", async (req, res) => {
   const { user_id, from, to, amount } = req.body;
@@ -142,11 +150,6 @@ app.post("/transfer", async (req, res) => {
 
     const wallet = user.rows[0];
 
-    const allowed = ["main", "savings", "business"];
-    if (!allowed.includes(from) || !allowed.includes(to)) {
-      return res.status(400).json({ error: "Invalid wallet type" });
-    }
-
     if (wallet[from] < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
     }
@@ -154,13 +157,16 @@ app.post("/transfer", async (req, res) => {
     const newFrom = wallet[from] - amount;
     const newTo = wallet[to] + amount;
 
-    const updated = await pool.query(
+    await pool.query(
       `UPDATE wallets
-       SET ${from} = $1,
-           ${to} = $2
-       WHERE user_id = $3
-       RETURNING *`,
-      [newFrom, newTo, user_id]
+       SET main = CASE WHEN $2 = 'main' THEN $3 ELSE main END,
+           savings = CASE WHEN $2 = 'savings' THEN $3 ELSE savings END,
+           business = CASE WHEN $2 = 'business' THEN $3 ELSE business END,
+           main = CASE WHEN $4 = 'main' THEN $5 ELSE main END,
+           savings = CASE WHEN $4 = 'savings' THEN $5 ELSE savings END,
+           business = CASE WHEN $4 = 'business' THEN $5 ELSE business END
+       WHERE user_id = $1`,
+      [user_id, from, newFrom, to, newTo]
     );
 
     await pool.query(
@@ -171,99 +177,26 @@ app.post("/transfer", async (req, res) => {
 
     res.json({
       message: "Transfer successful",
-      wallets: updated.rows[0]
+      wallets: {
+        ...wallet,
+        [from]: newFrom,
+        [to]: newTo
+      }
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Transfer failed" });
+    console.error("TRANSFER ERROR:", err.message);
+    res.status(500).json({
+      error: "Transfer failed",
+      details: err.message
+    });
   }
 });
 
 
 // =========================
-// 💸 P2P TRANSFER (USER → USER)
+// START SERVER
 // =========================
-app.post("/transfer-user", async (req, res) => {
-  const { from_user_id, to_email, amount } = req.body;
-
-  try {
-    // sender
-    const sender = await pool.query(
-      "SELECT * FROM wallets WHERE user_id = $1",
-      [from_user_id]
-    );
-
-    if (sender.rows.length === 0) {
-      return res.status(404).json({ error: "Sender not found" });
-    }
-
-    // receiver user
-    const receiverUser = await pool.query(
-      "SELECT id FROM users WHERE email = $1",
-      [to_email]
-    );
-
-    if (receiverUser.rows.length === 0) {
-      return res.status(404).json({ error: "Receiver not found" });
-    }
-
-    const to_user_id = receiverUser.rows[0].id;
-
-    // receiver wallet
-    const receiver = await pool.query(
-      "SELECT * FROM wallets WHERE user_id = $1",
-      [to_user_id]
-    );
-
-    if (receiver.rows.length === 0) {
-      return res.status(404).json({ error: "Receiver wallet missing" });
-    }
-
-    // balance check
-    if (sender.rows[0].main < amount) {
-      return res.status(400).json({ error: "Insufficient funds" });
-    }
-
-    // update sender
-    const newSender = sender.rows[0].main - amount;
-
-    await pool.query(
-      "UPDATE wallets SET main = $1 WHERE user_id = $2",
-      [newSender, from_user_id]
-    );
-
-    // update receiver
-    const newReceiver = receiver.rows[0].main + amount;
-
-    await pool.query(
-      "UPDATE wallets SET main = $1 WHERE user_id = $2",
-      [newReceiver, to_user_id]
-    );
-
-    // transaction logs
-    await pool.query(
-      `INSERT INTO transactions (user_id, type, amount, category, note)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [from_user_id, "transfer-out", amount, "p2p", `Sent to ${to_email}`]
-    );
-
-    await pool.query(
-      `INSERT INTO transactions (user_id, type, amount, category, note)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [to_user_id, "transfer-in", amount, "p2p", `Received`]
-    );
-
-    res.json({ message: "P2P transfer successful" });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "P2P transfer failed" });
-  }
-});
-
-
-// 🚀 START SERVER
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
