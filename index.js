@@ -9,23 +9,43 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/**
- * 🟢 HEALTH CHECK
- */
+/* =========================
+   HEALTH CHECK
+========================= */
 app.get("/", (req, res) => {
   res.send("Trackra API running 🚀");
 });
 
-/**
- * ➕ ADD TRANSACTION (income / expense)
- */
+/* =========================
+   LOGIN ROUTE
+========================= */
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const result = await pool.query(
+      "SELECT * FROM users WHERE email = $1 AND password = $2",
+      [email, password]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    res.json({ user: result.rows[0] });
+
+  } catch (err) {
+    console.log("LOGIN ERROR:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================
+   ADD TRANSACTION
+========================= */
 app.post("/transaction", async (req, res) => {
   try {
     const { user_id, type, amount, category, note } = req.body;
-
-    if (!user_id || !type || !amount) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
 
     const result = await pool.query(
       `INSERT INTO transactions (user_id, type, amount, category, note)
@@ -35,15 +55,16 @@ app.post("/transaction", async (req, res) => {
     );
 
     res.json(result.rows[0]);
+
   } catch (err) {
     console.log(err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-/**
- * 📜 GET TRANSACTIONS (history)
- */
+/* =========================
+   GET TRANSACTIONS
+========================= */
 app.get("/transactions/:user_id", async (req, res) => {
   try {
     const { user_id } = req.params;
@@ -56,14 +77,16 @@ app.get("/transactions/:user_id", async (req, res) => {
     );
 
     res.json(result.rows);
+
   } catch (err) {
+    console.log(err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-/**
- * 💰 GET BALANCE
- */
+/* =========================
+   GET BALANCE
+========================= */
 app.get("/balance/:user_id", async (req, res) => {
   try {
     const { user_id } = req.params;
@@ -80,23 +103,23 @@ app.get("/balance/:user_id", async (req, res) => {
       [user_id]
     );
 
-    const incomeTotal = parseFloat(income.rows[0].coalesce);
-    const expenseTotal = parseFloat(expense.rows[0].coalesce);
-
     res.json({
-      balance: incomeTotal - expenseTotal,
-      income: incomeTotal,
-      expense: expenseTotal
+      income: parseFloat(income.rows[0].coalesce),
+      expense: parseFloat(expense.rows[0].coalesce),
+      balance:
+        parseFloat(income.rows[0].coalesce) -
+        parseFloat(expense.rows[0].coalesce)
     });
 
   } catch (err) {
+    console.log(err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-/**
- * 🚀 START SERVER
- */
+/* =========================
+   START SERVER
+========================= */
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
