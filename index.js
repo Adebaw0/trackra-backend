@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔌 DATABASE
+// 🔌 DB CONNECTION
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -19,7 +19,6 @@ const pool = new Pool({
 app.get("/", (req, res) => {
   res.json({ message: "Trackra API Running 🚀" });
 });
-
 
 // =========================
 // LOGIN
@@ -48,7 +47,6 @@ app.post("/login", async (req, res) => {
   }
 });
 
-
 // =========================
 // GET WALLET
 // =========================
@@ -75,9 +73,8 @@ app.get("/wallets/:user_id", async (req, res) => {
   }
 });
 
-
 // =========================
-// TRANSACTIONS LIST
+// TRANSACTIONS
 // =========================
 app.get("/transactions/:user_id", async (req, res) => {
   const { user_id } = req.params;
@@ -96,59 +93,53 @@ app.get("/transactions/:user_id", async (req, res) => {
   }
 });
 
-
 // =========================
-// ADD TRANSACTION + FUND WALLET
+// ADD TRANSACTION (FUND WALLET)
 // =========================
 app.post("/transaction", async (req, res) => {
   const { user_id, type, wallet, amount, category, note } = req.body;
 
   try {
-    // insert transaction
     await pool.query(
       `INSERT INTO transactions (user_id, type, amount, category, note)
        VALUES ($1, $2, $3, $4, $5)`,
       [user_id, type, amount, category, note]
     );
 
-    // update wallet safely
-    if (wallet) {
-      const value = type === "income" ? amount : -amount;
+    const value = type === "income" ? amount : -amount;
 
-      await pool.query(
-        `UPDATE wallets
-         SET ${wallet} = COALESCE(${wallet}, 0) + $1
-         WHERE user_id = $2`,
-        [value, user_id]
-      );
-    }
+    await pool.query(
+      `UPDATE wallets
+       SET ${wallet} = COALESCE(${wallet}, 0) + $1
+       WHERE user_id = $2`,
+      [value, user_id]
+    );
 
     res.json({ message: "Transaction added" });
 
   } catch (err) {
-    console.error("TX ERROR:", err.message);
+    console.error(err);
     res.status(500).json({ error: "Transaction failed", details: err.message });
   }
 });
 
-
 // =========================
-// INTERNAL TRANSFER (FIXED)
+// 🔁 FIXED TRANSFER (NO SQL CONFLICT)
 // =========================
 app.post("/transfer", async (req, res) => {
   const { user_id, from, to, amount } = req.body;
 
   try {
-    const user = await pool.query(
+    const result = await pool.query(
       "SELECT * FROM wallets WHERE user_id = $1",
       [user_id]
     );
 
-    if (user.rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Wallet not found" });
     }
 
-    const wallet = user.rows[0];
+    const wallet = result.rows[0];
 
     if (wallet[from] < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
@@ -157,16 +148,15 @@ app.post("/transfer", async (req, res) => {
     const newFrom = wallet[from] - amount;
     const newTo = wallet[to] + amount;
 
+    // ✅ SAFE: update separately (FIXED BUG)
     await pool.query(
-      `UPDATE wallets
-       SET main = CASE WHEN $2 = 'main' THEN $3 ELSE main END,
-           savings = CASE WHEN $2 = 'savings' THEN $3 ELSE savings END,
-           business = CASE WHEN $2 = 'business' THEN $3 ELSE business END,
-           main = CASE WHEN $4 = 'main' THEN $5 ELSE main END,
-           savings = CASE WHEN $4 = 'savings' THEN $5 ELSE savings END,
-           business = CASE WHEN $4 = 'business' THEN $5 ELSE business END
-       WHERE user_id = $1`,
-      [user_id, from, newFrom, to, newTo]
+      `UPDATE wallets SET ${from} = $1 WHERE user_id = $2`,
+      [newFrom, user_id]
+    );
+
+    await pool.query(
+      `UPDATE wallets SET ${to} = $1 WHERE user_id = $2`,
+      [newTo, user_id]
     );
 
     await pool.query(
@@ -192,7 +182,6 @@ app.post("/transfer", async (req, res) => {
     });
   }
 });
-
 
 // =========================
 // START SERVER
