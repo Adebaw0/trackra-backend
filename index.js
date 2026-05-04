@@ -3,6 +3,7 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
+const bcrypt = require("bcrypt");
 
 const app = express();
 
@@ -20,7 +21,7 @@ app.get("/", (req, res) => {
   res.json({ message: "Trackra API Running 🚀" });
 });
 
-// ================= AUTH =================
+// ================= AUTH MIDDLEWARE =================
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
 
@@ -35,7 +36,7 @@ const auth = (req, res, next) => {
   }
 };
 
-// ================= LOGIN =================
+// ================= LOGIN (SECURE) =================
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
@@ -51,13 +52,16 @@ app.post("/login", async (req, res) => {
 
     const user = result.rows[0];
 
-    if (user.password !== password) {
+    const validPassword = await bcrypt.compare(password, user.password);
+
+    if (!validPassword) {
       return res.status(401).json({ error: "Invalid password" });
     }
 
     const token = jwt.sign(
       { id: user.id },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
     );
 
     res.json({ user, token });
@@ -171,7 +175,7 @@ app.post("/paystack/init", auth, async (req, res) => {
   }
 });
 
-// ================= PAYSTACK VERIFY + AUTO CREDIT =================
+// ================= PAYSTACK VERIFY + CREDIT WALLET =================
 app.get("/paystack/verify/:reference", auth, async (req, res) => {
   try {
     const response = await axios.get(
