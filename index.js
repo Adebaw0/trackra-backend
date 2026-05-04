@@ -2,7 +2,6 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
-const fetch = require("node-fetch");
 
 const app = express();
 
@@ -40,23 +39,27 @@ app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    const user = await pool.query(
+    const result = await pool.query(
       "SELECT * FROM users WHERE email = $1",
       [email]
     );
 
-    if (user.rows.length === 0)
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "User not found" });
+    }
 
-    if (user.rows[0].password !== password)
+    const user = result.rows[0];
+
+    if (user.password !== password) {
       return res.status(401).json({ error: "Invalid password" });
+    }
 
     const token = jwt.sign(
-      { id: user.rows[0].id },
+      { id: user.id },
       process.env.JWT_SECRET
     );
 
-    res.json({ user: user.rows[0], token });
+    res.json({ user, token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -95,26 +98,28 @@ app.post("/transfer", auth, async (req, res) => {
   const { user_id, from, to, amount } = req.body;
 
   try {
-    const wallet = await pool.query(
+    const walletRes = await pool.query(
       "SELECT * FROM wallets WHERE user_id = $1",
       [user_id]
     );
 
-    if (!wallet.rows.length)
+    if (!walletRes.rows.length)
       return res.status(404).json({ error: "Wallet not found" });
 
-    const w = wallet.rows[0];
+    const wallet = walletRes.rows[0];
 
     const allowed = ["main", "savings", "business"];
 
-    if (!allowed.includes(from) || !allowed.includes(to))
+    if (!allowed.includes(from) || !allowed.includes(to)) {
       return res.status(400).json({ error: "Invalid wallet type" });
+    }
 
-    if (w[from] < amount)
+    if (wallet[from] < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
+    }
 
-    const newFrom = w[from] - amount;
-    const newTo = w[to] + amount;
+    const newFrom = wallet[from] - amount;
+    const newTo = wallet[to] + amount;
 
     await pool.query(
       `UPDATE wallets SET ${from} = $1 WHERE user_id = $2`,
@@ -134,53 +139,8 @@ app.post("/transfer", auth, async (req, res) => {
 
     res.json({
       message: "Transfer successful",
-      wallets: { ...w, [from]: newFrom, [to]: newTo },
+      wallets: { ...wallet, [from]: newFrom, [to]: newTo },
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ================= PAYSTACK INIT (ADD MONEY) =================
-app.post("/paystack/init", auth, async (req, res) => {
-  const { email, amount } = req.body;
-
-  try {
-    const response = await fetch(
-      "https://api.paystack.co/transaction/initialize",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email,
-          amount: amount * 100,
-        }),
-      }
-    );
-
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ================= ANALYTICS =================
-app.get("/analytics/:user_id", auth, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT 
-        SUM(amount) FILTER (WHERE type='income') AS income,
-        SUM(amount) FILTER (WHERE type='transfer') AS spent
-      FROM transactions
-      WHERE user_id = $1`,
-      [req.params.user_id]
-    );
-
-    res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
