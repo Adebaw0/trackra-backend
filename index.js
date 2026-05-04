@@ -2,13 +2,14 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ================= DATABASE =================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -16,9 +17,9 @@ const pool = new Pool({
 
 const JWT_SECRET = process.env.JWT_SECRET || "trackra_secret";
 
-// ================= HEALTH =================
+// ================= HEALTH CHECK =================
 app.get("/", (req, res) => {
-  res.json({ message: "Trackra Secure API Running 🔒" });
+  res.json({ message: "Trackra API Running 🔒" });
 });
 
 // ================= AUTH MIDDLEWARE =================
@@ -33,26 +34,26 @@ const auth = (req, res, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 };
 
-// ================= LOGIN (JWT) =================
+// ================= LOGIN =================
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    const result = await pool.query(
+    const userRes = await pool.query(
       "SELECT * FROM users WHERE email = $1",
       [email]
     );
 
-    if (!result.rows.length) {
+    if (!userRes.rows.length) {
       return res.status(400).json({ error: "User not found" });
     }
 
-    const user = result.rows[0];
+    const user = userRes.rows[0];
 
     if (user.password !== password) {
       return res.status(400).json({ error: "Invalid password" });
@@ -73,12 +74,10 @@ app.post("/login", async (req, res) => {
 
 // ================= WALLET =================
 app.get("/wallets/:user_id", auth, async (req, res) => {
-  const { user_id } = req.params;
-
   try {
     const result = await pool.query(
       "SELECT * FROM wallets WHERE user_id = $1",
-      [user_id]
+      [req.params.user_id]
     );
 
     if (!result.rows.length) {
@@ -111,7 +110,7 @@ app.get("/transactions/:user_id", auth, async (req, res) => {
   }
 });
 
-// ================= INTERNAL TRANSFER (SECURE PIN) =================
+// ================= INTERNAL TRANSFER =================
 app.post("/transfer", auth, async (req, res) => {
   const { user_id, from, to, amount, pin } = req.body;
 
@@ -159,7 +158,10 @@ app.post("/transfer", auth, async (req, res) => {
       [user_id, "transfer", amount, "wallet-transfer", `${from} → ${to}`]
     );
 
-    res.json({ message: "Transfer successful" });
+    res.json({
+      message: "Transfer successful",
+      wallets: { ...wallet, [from]: newFrom, [to]: newTo },
+    });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -230,9 +232,9 @@ app.post("/transfer-user", auth, async (req, res) => {
   }
 });
 
-// ================= SERVER =================
+// ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Trackra Secure API running on port", PORT);
+  console.log(`Trackra running on port ${PORT}`);
 });
