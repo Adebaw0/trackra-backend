@@ -20,7 +20,7 @@ app.get("/", (req, res) => {
   res.json({ message: "Trackra API Running 🚀" });
 });
 
-// ================= AUTH MIDDLEWARE =================
+// ================= AUTH =================
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
 
@@ -30,7 +30,7 @@ const auth = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 };
@@ -106,8 +106,6 @@ app.post("/transfer", auth, async (req, res) => {
 
     const wallet = walletRes.rows[0];
 
-    if (!wallet) return res.status(404).json({ error: "Wallet not found" });
-
     const allowed = ["main", "savings", "business"];
 
     if (!allowed.includes(from) || !allowed.includes(to)) {
@@ -160,7 +158,6 @@ app.post("/paystack/init", auth, async (req, res) => {
       {
         headers: {
           Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          "Content-Type": "application/json",
         },
       }
     );
@@ -174,7 +171,7 @@ app.post("/paystack/init", auth, async (req, res) => {
   }
 });
 
-// ================= PAYSTACK VERIFY =================
+// ================= PAYSTACK VERIFY + AUTO CREDIT =================
 app.get("/paystack/verify/:reference", auth, async (req, res) => {
   try {
     const response = await axios.get(
@@ -186,7 +183,41 @@ app.get("/paystack/verify/:reference", auth, async (req, res) => {
       }
     );
 
-    res.json(response.data);
+    const data = response.data.data;
+
+    if (data.status === "success") {
+      const email = data.customer.email;
+      const amount = data.amount / 100;
+
+      const userResult = await pool.query(
+        "SELECT * FROM users WHERE email = $1",
+        [email]
+      );
+
+      const user = userResult.rows[0];
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      await pool.query(
+        "UPDATE wallets SET main = main + $1 WHERE user_id = $2",
+        [amount, user.id]
+      );
+
+      await pool.query(
+        `INSERT INTO transactions (user_id, type, amount, note)
+         VALUES ($1, $2, $3, $4)`,
+        [user.id, "deposit", amount, "Paystack funding"]
+      );
+
+      return res.json({
+        message: "Wallet credited successfully",
+        amount,
+      });
+    }
+
+    res.status(400).json({ error: "Payment not successful" });
   } catch (err) {
     res.status(500).json({
       error: "Verification failed",
