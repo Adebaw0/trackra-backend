@@ -2,48 +2,77 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ================= DATABASE =================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
+const JWT_SECRET = process.env.JWT_SECRET || "trackra_secret";
+
 // ================= HEALTH =================
 app.get("/", (req, res) => {
-  res.json({ message: "Trackra API Running 🚀" });
+  res.json({ message: "Trackra Secure API Running 🔒" });
 });
 
-// ================= LOGIN =================
+// ================= AUTH MIDDLEWARE =================
+const auth = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "No token provided" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+// ================= LOGIN (JWT) =================
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   try {
     const result = await pool.query(
-      "SELECT * FROM users WHERE email = $1 AND password = $2",
-      [email, password]
+      "SELECT * FROM users WHERE email = $1",
+      [email]
     );
 
     if (!result.rows.length) {
-      return res.status(400).json({ error: "Invalid credentials" });
+      return res.status(400).json({ error: "User not found" });
     }
 
     const user = result.rows[0];
+
+    if (user.password !== password) {
+      return res.status(400).json({ error: "Invalid password" });
+    }
+
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
     delete user.password;
 
-    res.json({ user });
+    res.json({ user, token });
 
   } catch (err) {
     res.status(500).json({ error: "Login failed" });
   }
 });
 
-// ================= GET WALLET =================
-app.get("/wallets/:user_id", async (req, res) => {
+// ================= WALLET =================
+app.get("/wallets/:user_id", auth, async (req, res) => {
   const { user_id } = req.params;
 
   try {
@@ -65,38 +94,25 @@ app.get("/wallets/:user_id", async (req, res) => {
   }
 });
 
-// ================= ADD TRANSACTION =================
-app.post("/transaction", async (req, res) => {
-  const { user_id, type, wallet, amount, category, note } = req.body;
-
+// ================= TRANSACTIONS =================
+app.get("/transactions/:user_id", auth, async (req, res) => {
   try {
-    await pool.query(
-      `INSERT INTO transactions (user_id, type, amount, category, note)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [user_id, type, amount, category, note]
+    const result = await pool.query(
+      `SELECT * FROM transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC`,
+      [req.params.user_id]
     );
 
-    const value = type === "income" ? amount : -amount;
-
-    await pool.query(
-      `UPDATE wallets 
-       SET ${wallet} = COALESCE(${wallet}, 0) + $1 
-       WHERE user_id = $2`,
-      [value, user_id]
-    );
-
-    res.json({ message: "Transaction successful" });
+    res.json({ transactions: result.rows });
 
   } catch (err) {
-    res.status(500).json({
-      error: "Transaction failed",
-      details: err.message,
-    });
+    res.status(500).json({ error: "Failed to fetch transactions" });
   }
 });
 
-// ================= INTERNAL TRANSFER =================
-app.post("/transfer", async (req, res) => {
+// ================= INTERNAL TRANSFER (SECURE PIN) =================
+app.post("/transfer", auth, async (req, res) => {
   const { user_id, from, to, amount, pin } = req.body;
 
   try {
@@ -105,13 +121,11 @@ app.post("/transfer", async (req, res) => {
       [user_id]
     );
 
-    if (!userRes.rows.length) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
     const user = userRes.rows[0];
 
-    if (!user.pin || user.pin !== pin) {
+    const validPin = await bcrypt.compare(pin, user.pin);
+
+    if (!validPin) {
       return res.status(401).json({ error: "Invalid PIN" });
     }
 
@@ -120,16 +134,7 @@ app.post("/transfer", async (req, res) => {
       [user_id]
     );
 
-    if (!walletRes.rows.length) {
-      return res.status(404).json({ error: "Wallet not found" });
-    }
-
     const wallet = walletRes.rows[0];
-
-    const allowed = ["main", "savings", "business"];
-    if (!allowed.includes(from) || !allowed.includes(to)) {
-      return res.status(400).json({ error: "Invalid wallet type" });
-    }
 
     if (wallet[from] < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
@@ -154,21 +159,15 @@ app.post("/transfer", async (req, res) => {
       [user_id, "transfer", amount, "wallet-transfer", `${from} → ${to}`]
     );
 
-    res.json({
-      message: "Transfer successful",
-      wallets: { ...wallet, [from]: newFrom, [to]: newTo },
-    });
+    res.json({ message: "Transfer successful" });
 
   } catch (err) {
-    res.status(500).json({
-      error: "Transfer failed",
-      details: err.message,
-    });
+    res.status(500).json({ error: err.message });
   }
 });
 
 // ================= P2P TRANSFER =================
-app.post("/transfer-user", async (req, res) => {
+app.post("/transfer-user", auth, async (req, res) => {
   const { sender_id, receiver_id, amount, pin } = req.body;
 
   try {
@@ -177,39 +176,30 @@ app.post("/transfer-user", async (req, res) => {
       [sender_id]
     );
 
-    if (!senderRes.rows.length) {
-      return res.status(404).json({ error: "Sender not found" });
-    }
-
     const sender = senderRes.rows[0];
 
-    if (!sender.pin || sender.pin !== pin) {
+    const validPin = await bcrypt.compare(pin, sender.pin);
+
+    if (!validPin) {
       return res.status(401).json({ error: "Invalid PIN" });
     }
 
-    const senderWalletRes = await pool.query(
+    const senderWallet = await pool.query(
       "SELECT * FROM wallets WHERE user_id = $1",
       [sender_id]
     );
 
-    const receiverWalletRes = await pool.query(
+    const receiverWallet = await pool.query(
       "SELECT * FROM wallets WHERE user_id = $1",
       [receiver_id]
     );
 
-    if (!senderWalletRes.rows.length || !receiverWalletRes.rows.length) {
-      return res.status(404).json({ error: "Wallet not found" });
-    }
-
-    const senderWallet = senderWalletRes.rows[0];
-    const receiverWallet = receiverWalletRes.rows[0];
-
-    if (senderWallet.main < amount) {
+    if (senderWallet.rows[0].main < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    const newSender = senderWallet.main - amount;
-    const newReceiver = receiverWallet.main + amount;
+    const newSender = senderWallet.rows[0].main - amount;
+    const newReceiver = receiverWallet.rows[0].main + amount;
 
     await pool.query(
       "UPDATE wallets SET main = $1 WHERE user_id = $2",
@@ -236,38 +226,13 @@ app.post("/transfer-user", async (req, res) => {
     res.json({ message: "P2P transfer successful" });
 
   } catch (err) {
-    res.status(500).json({
-      error: "Transfer failed",
-      details: err.message,
-    });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ================= TRANSACTION HISTORY =================
-app.get("/transactions/:user_id", async (req, res) => {
-  const { user_id } = req.params;
-
-  try {
-    const result = await pool.query(
-      `SELECT * FROM transactions
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      [user_id]
-    );
-
-    res.json({ transactions: result.rows });
-
-  } catch (err) {
-    res.status(500).json({
-      error: "Failed to fetch transactions",
-      details: err.message,
-    });
-  }
-});
-
-// ================= START SERVER =================
+// ================= SERVER =================
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("Trackra Secure API running on port", PORT);
 });
