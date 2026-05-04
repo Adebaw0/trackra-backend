@@ -7,24 +7,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// =========================
-// DATABASE CONNECTION
-// =========================
+// ================= DATABASE =================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
-// =========================
-// HEALTH CHECK
-// =========================
+// ================= HEALTH =================
 app.get("/", (req, res) => {
-  res.json({ message: "Wallet API Running 🚀" });
+  res.json({ message: "Trackra API Running 🚀" });
 });
 
-// =========================
-// LOGIN
-// =========================
+// ================= LOGIN =================
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
@@ -48,9 +42,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// =========================
-// GET WALLET
-// =========================
+// ================= GET WALLET =================
 app.get("/wallets/:user_id", async (req, res) => {
   const { user_id } = req.params;
 
@@ -62,7 +54,7 @@ app.get("/wallets/:user_id", async (req, res) => {
 
     if (!result.rows.length) {
       return res.json({
-        wallets: { main: 0, savings: 0, business: 0 }
+        wallets: { main: 0, savings: 0, business: 0 },
       });
     }
 
@@ -73,9 +65,7 @@ app.get("/wallets/:user_id", async (req, res) => {
   }
 });
 
-// =========================
-// FUND / TRANSACTION
-// =========================
+// ================= ADD TRANSACTION =================
 app.post("/transaction", async (req, res) => {
   const { user_id, type, wallet, amount, category, note } = req.body;
 
@@ -89,7 +79,8 @@ app.post("/transaction", async (req, res) => {
     const value = type === "income" ? amount : -amount;
 
     await pool.query(
-      `UPDATE wallets SET ${wallet} = COALESCE(${wallet}, 0) + $1
+      `UPDATE wallets 
+       SET ${wallet} = COALESCE(${wallet}, 0) + $1 
        WHERE user_id = $2`,
       [value, user_id]
     );
@@ -97,42 +88,43 @@ app.post("/transaction", async (req, res) => {
     res.json({ message: "Transaction successful" });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: "Transaction failed",
+      details: err.message,
+    });
   }
 });
 
-// =========================
-// INTERNAL TRANSFER (WITH PIN)
-// =========================
+// ================= INTERNAL TRANSFER =================
 app.post("/transfer", async (req, res) => {
   const { user_id, from, to, amount, pin } = req.body;
 
   try {
-    const userResult = await pool.query(
+    const userRes = await pool.query(
       "SELECT * FROM users WHERE id = $1",
       [user_id]
     );
 
-    if (!userResult.rows.length) {
+    if (!userRes.rows.length) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const user = userResult.rows[0];
+    const user = userRes.rows[0];
 
     if (!user.pin || user.pin !== pin) {
       return res.status(401).json({ error: "Invalid PIN" });
     }
 
-    const walletResult = await pool.query(
+    const walletRes = await pool.query(
       "SELECT * FROM wallets WHERE user_id = $1",
       [user_id]
     );
 
-    if (!walletResult.rows.length) {
+    if (!walletRes.rows.length) {
       return res.status(404).json({ error: "Wallet not found" });
     }
 
-    const wallet = walletResult.rows[0];
+    const wallet = walletRes.rows[0];
 
     const allowed = ["main", "savings", "business"];
     if (!allowed.includes(from) || !allowed.includes(to)) {
@@ -164,17 +156,18 @@ app.post("/transfer", async (req, res) => {
 
     res.json({
       message: "Transfer successful",
-      wallets: { ...wallet, [from]: newFrom, [to]: newTo }
+      wallets: { ...wallet, [from]: newFrom, [to]: newTo },
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: "Transfer failed",
+      details: err.message,
+    });
   }
 });
 
-// =========================
-// P2P TRANSFER (USER → USER)
-// =========================
+// ================= P2P TRANSFER =================
 app.post("/transfer-user", async (req, res) => {
   const { sender_id, receiver_id, amount, pin } = req.body;
 
@@ -243,13 +236,36 @@ app.post("/transfer-user", async (req, res) => {
     res.json({ message: "P2P transfer successful" });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: "Transfer failed",
+      details: err.message,
+    });
   }
 });
 
-// =========================
-// START SERVER
-// =========================
+// ================= TRANSACTION HISTORY =================
+app.get("/transactions/:user_id", async (req, res) => {
+  const { user_id } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT * FROM transactions
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [user_id]
+    );
+
+    res.json({ transactions: result.rows });
+
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch transactions",
+      details: err.message,
+    });
+  }
+});
+
+// ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
