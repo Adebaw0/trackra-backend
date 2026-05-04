@@ -2,13 +2,14 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
+const axios = require("axios");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// ================= DB =================
+// ================= DATABASE =================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -16,10 +17,10 @@ const pool = new Pool({
 
 // ================= HEALTH =================
 app.get("/", (req, res) => {
-  res.json({ message: "Trackra API Running 🔒" });
+  res.json({ message: "Trackra API Running 🚀" });
 });
 
-// ================= AUTH =================
+// ================= AUTH MIDDLEWARE =================
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
 
@@ -29,8 +30,8 @@ const auth = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
   }
 };
 
@@ -44,7 +45,7 @@ app.post("/login", async (req, res) => {
       [email]
     );
 
-    if (result.rows.length === 0) {
+    if (!result.rows.length) {
       return res.status(404).json({ error: "User not found" });
     }
 
@@ -103,10 +104,9 @@ app.post("/transfer", auth, async (req, res) => {
       [user_id]
     );
 
-    if (!walletRes.rows.length)
-      return res.status(404).json({ error: "Wallet not found" });
-
     const wallet = walletRes.rows[0];
+
+    if (!wallet) return res.status(404).json({ error: "Wallet not found" });
 
     const allowed = ["main", "savings", "business"];
 
@@ -143,6 +143,55 @@ app.post("/transfer", auth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ================= PAYSTACK INIT =================
+app.post("/paystack/init", auth, async (req, res) => {
+  const { email, amount } = req.body;
+
+  try {
+    const response = await axios.post(
+      "https://api.paystack.co/transaction/initialize",
+      {
+        email,
+        amount: amount * 100,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({
+      error: "Payment init failed",
+      details: err.message,
+    });
+  }
+});
+
+// ================= PAYSTACK VERIFY =================
+app.get("/paystack/verify/:reference", auth, async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://api.paystack.co/transaction/verify/${req.params.reference}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        },
+      }
+    );
+
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({
+      error: "Verification failed",
+      details: err.message,
+    });
   }
 });
 
